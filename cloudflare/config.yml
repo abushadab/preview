@@ -1,0 +1,14 @@
+tunnel: <TUNNEL_ID>
+credentials-file: /home/claudable/preview/cloudflare/<TUNNEL_ID>.json
+
+ingress:
+  # API endpoint
+  - hostname: api.baytlabs.com
+    service: http://localhost:3001
+
+  # Dynamic sandbox subdomains
+  - hostname: "*.sandbox.baytlabs.com"
+    service: http://localhost:3000
+
+  # Default catch-all
+  - service: http_status:404

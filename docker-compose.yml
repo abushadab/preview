@@ -1,0 +1,99 @@
+version: '3.9'
+services:
+  traefik:
+    image: traefik:v3.1
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=preview_sbx-network
+      - --providers.docker.constraints=Label(`com.docker.compose.project`,`preview`)
+      - --entrypoints.web.address=:80
+      - --log.level=INFO
+    ports:
+      - "80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+    restart: unless-stopped
+    networks:
+      - sbx-network
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+    networks:
+      - sbx-network
+    volumes:
+      - redis-data:/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+    networks:
+      - sbx-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.minio.rule=Host(`minio.${PREVIEW_DOMAIN}`)"
+      - "traefik.http.routers.minio.entrypoints=web"
+      # MinIO SSL handled by Cloudflare
+      - "traefik.http.services.minio.loadbalancer.server.port=9000"
+      - "traefik.http.routers.minio-console.rule=Host(`minio-console.${PREVIEW_DOMAIN}`)"
+      - "traefik.http.routers.minio-console.entrypoints=web"
+      - "traefik.http.services.minio-console.loadbalancer.server.port=9001"
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    env_file: .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./api:/app
+      - /app/node_modules
+      - $HOME/preview/projects:$HOME/preview/projects  # shared directory for bind mounts
+    depends_on:
+      - redis
+      - minio
+      - traefik
+    restart: unless-stopped
+    networks:
+      - sbx-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=preview_sbx-network"
+
+      # Middlewares
+      - "traefik.http.middlewares.limit.buffering.maxRequestBodyBytes=10485760"
+      - "traefik.http.middlewares.admin-allowlist.ipallowlist.sourcerange=127.0.0.1/32,172.18.0.0/16"
+      - "traefik.http.middlewares.rate-limit.ratelimit.average=100"
+      - "traefik.http.middlewares.rate-limit.ratelimit.burst=50"
+
+      # Single service definition
+      - "traefik.http.services.api.loadbalancer.server.port=3001"
+
+      # Public router (health only) + body size limit
+      - "traefik.http.routers.api-public.rule=Host(`api.${PREVIEW_DOMAIN}`) && PathPrefix(`/health`)"
+      - "traefik.http.routers.api-public.entrypoints=web"
+      - "traefik.http.routers.api-public.middlewares=limit"
+      - "traefik.http.routers.api-public.service=api"
+
+      # Admin router (everything else) + allowlist + rate-limit + size limit
+      - "traefik.http.routers.api-admin.rule=Host(`api.${PREVIEW_DOMAIN}`)"
+      - "traefik.http.routers.api-admin.entrypoints=web"
+      - "traefik.http.routers.api-admin.middlewares=admin-allowlist,rate-limit,limit"
+      - "traefik.http.routers.api-admin.service=api"
+
+networks:
+  sbx-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  minio-data:

@@ -1,0 +1,30 @@
+# Node / runtime
+node_modules/
+npm-debug.log*
+yarn.lock
+pnpm-lock.yaml
+
+# Editor/OS
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Build & runtime artifacts
+dist/
+coverage/
+*.log
+tmp/
+**/.cache/
+
+# Containers & backups
+backups/
+letsencrypt/
+*.tar.gz
+*.tar.gz.age
+
+# Local env & secrets (DO NOT COMMIT)
+.env
+.env.*
+ops.agekey
+/run/secrets/*
