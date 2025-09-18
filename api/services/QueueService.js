@@ -1,6 +1,7 @@
 const { Queue, Worker } = require('bullmq');
 const Redis = require('ioredis');
 const logger = require('../utils/logger');
+const { resolveEnv, redactUrl } = require('../utils/env');
 
 class QueueService {
   constructor() {
@@ -9,12 +10,13 @@ class QueueService {
     this.devQueue = null;
     this.buildWorker = null;
     this.devWorker = null;
+    this.redisUrl = resolveEnv('REDIS_URL', { required: true });
   }
 
   async initialize() {
     try {
       // Create Redis connection
-      this.redisConnection = new Redis(process.env.REDIS_URL, {
+      this.redisConnection = new Redis(this.redisUrl, {
         maxRetriesPerRequest: null,
         enableReadyCheck: false
       });
@@ -68,7 +70,9 @@ class QueueService {
 
       logger.info(`Added sandbox ${sandboxData.id} to ${sandboxData.mode} queue`, {
         jobId: job.id,
-        mode: sandboxData.mode
+        mode: sandboxData.mode,
+        fileCount: sandboxData.files ? sandboxData.files.length : 0,
+        envKeys: Object.keys(sandboxData.env || {})
       });
 
       return job;
@@ -144,7 +148,7 @@ class QueueService {
 
       return {
         redis: {
-          url: process.env.REDIS_URL,
+          url: redactUrl(this.redisUrl),
           pingMs: redisPingMs
         },
         queues: stats,
@@ -162,7 +166,11 @@ class QueueService {
       this.buildWorker = new Worker(
         'buildQueue',
         async (job) => {
-          logger.info('Processing build job', { jobId: job.id, data: job.data });
+          logger.info('Processing build job', {
+            jobId: job.id,
+            sandboxId: job.data?.id,
+            mode: job.data?.mode
+          });
           return await sandboxManager.buildProductionSandbox(job.data);
         },
         {
@@ -179,7 +187,11 @@ class QueueService {
       this.devWorker = new Worker(
         'devQueue',
         async (job) => {
-          logger.info('Processing dev job', { jobId: job.id, data: job.data });
+          logger.info('Processing dev job', {
+            jobId: job.id,
+            sandboxId: job.data?.id,
+            mode: job.data?.mode
+          });
           return await sandboxManager.buildDevSandbox(job.data);
         },
         {
@@ -195,11 +207,11 @@ class QueueService {
       // Event listeners
       [this.buildWorker, this.devWorker].forEach(worker => {
         worker.on('completed', (job) => {
-          logger.info('Job completed', { jobId: job.id, result: job.returnvalue });
+          logger.info('Job completed', { jobId: job.id, sandboxId: job.data?.id });
         });
 
         worker.on('failed', (job, err) => {
-          logger.error('Job failed', { jobId: job.id, error: err.message });
+          logger.error('Job failed', { jobId: job?.id, sandboxId: job?.data?.id, error: err.message });
         });
 
         worker.on('error', (err) => {

@@ -74,6 +74,7 @@ services:
       - "traefik.http.middlewares.admin-allowlist.ipallowlist.sourcerange=127.0.0.1/32,172.18.0.0/16"
       - "traefik.http.middlewares.rate-limit.ratelimit.average=100"
       - "traefik.http.middlewares.rate-limit.ratelimit.burst=50"
+      - "traefik.http.middlewares.rate-limit.ratelimit.period=1m"
 
       # Single service definition
       - "traefik.http.services.api.loadbalancer.server.port=3001"

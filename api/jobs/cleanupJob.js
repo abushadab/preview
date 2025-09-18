@@ -2,15 +2,17 @@ const cron = require('node-cron');
 const logger = require('../utils/logger');
 const Redis = require('ioredis');
 const Docker = require('dockerode');
+const { resolveEnv } = require('../utils/env');
 
 class CleanupJob {
   constructor() {
     this.redisConnection = null;
     this.docker = new Docker();
+    this.redisUrl = resolveEnv('REDIS_URL', { required: true });
   }
 
   async initialize() {
-    this.redisConnection = new Redis(process.env.REDIS_URL, {
+    this.redisConnection = new Redis(this.redisUrl, {
       maxRetriesPerRequest: null,
       enableReadyCheck: false
     });
@@ -89,9 +91,7 @@ class CleanupJob {
       });
       logger.info('Pruned images:', imageResult);
 
-      // Remove unused networks
-      const networkResult = await this.docker.pruneNetworks();
-      logger.info('Pruned networks:', networkResult);
+      logger.debug('Skipping docker network prune to preserve shared networks');
 
       logger.info('Docker resource cleanup completed successfully');
     } catch (error) {

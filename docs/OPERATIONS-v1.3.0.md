@@ -28,6 +28,13 @@ MAX_FILES=100
 IMAGE_TAG=1.3.0          # Pin for reproducible deploys, safer rollbacks
 ```
 
+| `_FILE` Variable            | Purpose                         | Notes                               |
+|----------------------------|---------------------------------|-------------------------------------|
+| `API_TOKEN_FILE`           | Admin API bearer token          | Mounted secret preferred            |
+| `REDIS_URL_FILE`           | Redis connection URI            | Overrides plain `REDIS_URL`         |
+| `MINIO_ROOT_USER_FILE`     | MinIO access key                | Required if plain var unset         |
+| `MINIO_ROOT_PASSWORD_FILE` | MinIO secret key                | Required if plain var unset         |
+
 ### Service Bootstrap
 
 ```bash
@@ -46,6 +53,14 @@ docker ps --format '{{.Ports}}' | grep -E '3001|:3001' || echo "✅ No host port
 ---
 
 ## 10-Minute Truth Test (CLI)
+
+Run the helpers where possible:
+
+```bash
+PREVIEW_DOMAIN=hellyo.io API_TOKEN=**** make prereq auth-test test-size-guard
+```
+
+For automation, see `.github/workflows/truth-test.yml` which mirrors these checks.
 
 ### Health & Routing Validation
 
@@ -103,7 +118,20 @@ echo "Status: $code"
 curl -s -H "Host: api.${PREVIEW_DOMAIN}" \
      -H "Authorization: Bearer $API_TOKEN" \
      http://127.0.0.1/sandbox/demo-id/ready | jq -e '.ready && .method'
-# Expected: {"ready":true,"status":200,"method":"curl|wget|node","response_time":<ms>}
+# Expected: {"ready":true,"status":200,"method":"curl|wget|node","latency_ms":<ms>}
+
+### Metrics (auth required)
+
+```bash
+curl -s -H "Host: api.${PREVIEW_DOMAIN}" \
+     -H "Authorization: Bearer $API_TOKEN" \
+     http://127.0.0.1/metrics | head -n 6
+# sample:
+# HELP sandbox_api_guardrail_total Counts guarded responses
+# TYPE sandbox_api_guardrail_total counter
+# HELP sandbox_ready_status_total Counts /sandbox/:id/ready outcomes
+# TYPE sandbox_ready_status_total counter
+```
 ```
 
 ---

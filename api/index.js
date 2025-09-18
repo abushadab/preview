@@ -20,6 +20,8 @@ const QueueService = require('./services/QueueService');
 const StorageService = require('./services/StorageService');
 const logger = require('./utils/logger');
 const URLGenerator = require('./utils/urlGenerator');
+const { resolveEnv } = require('./utils/env');
+const metrics = require('./utils/metrics');
 const Docker = require('dockerode');
 
 const app = express();
@@ -38,6 +40,7 @@ app.use((req, res, next) => {
   res.set('X-Request-ID', req.id);
   next();
 });
+app.use(metrics.requestObserver);
 
 // Body limits with proper error handling
 app.use(express.json({ limit: '10mb' })); // Reduced from 50mb to catch oversize
@@ -52,13 +55,15 @@ app.use((err, req, res, next) => {
 });
 
 // Auth middleware for admin endpoints
+const API_TOKEN = resolveEnv('API_TOKEN', { required: true });
+
 function requireAuth(req, res, next) {
   const authHeader = req.get('Authorization') || '';
   if (!authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Missing or invalid authorization header' });
   }
   const token = authHeader.slice(7);
-  if (token !== process.env.API_TOKEN) {
+  if (token !== API_TOKEN) {
     return res.status(403).json({ error: 'Invalid or expired token' });
   }
 
@@ -70,12 +75,6 @@ function requireAuth(req, res, next) {
   });
 
   next();
-}
-
-// Fail fast if API_TOKEN is not set
-if (!process.env.API_TOKEN) {
-  console.error('FATAL: API_TOKEN is not set in environment variables');
-  process.exit(1);
 }
 
 // Services
@@ -100,22 +99,35 @@ app.get('/health', (req, res) => {
   });
 });
 
+app.get('/metrics', requireAuth, metrics.sendMetrics);
+
 // Readiness check - check if sandbox container is actually serving
-app.get('/sandbox/:id/ready', async (req, res) => {
+app.get('/sandbox/:id/ready', requireAuth, async (req, res) => {
+  const startedAt = process.hrtime.bigint();
+  const elapsedMs = () => Number((process.hrtime.bigint() - startedAt) / BigInt(1e6));
   try {
     const name = `sbx-${req.params.id}`;
     const container = docker.getContainer(name);
 
     // Check if container exists and is running
-    const info = await container.inspect();
+    let info;
+    try {
+      info = await container.inspect();
+    } catch (error) {
+      if (error.statusCode === 404) {
+        return res.status(404).json({ ready: false, reason: 'Sandbox not found', latency_ms: elapsedMs() });
+      }
+      throw error;
+    }
     if (info.State?.Status !== 'running') {
-      return res.json({ ready: false, reason: 'Container not running', status: info.State?.Status });
+      return res.status(503).json({ ready: false, reason: 'Container not running', status: info.State?.Status || 'unknown', latency_ms: elapsedMs() });
     }
 
     // Use container exec to test HTTP connectivity (works with Traefik-only networking)
     // Try different methods: curl -> wget -> node fetch
     let statusCode = 0;
     let method = '';
+    let lastError = null;
 
     for (const testCmd of [
       `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000${req.query.path || '/'}`,
@@ -148,27 +160,35 @@ app.get('/sandbox/:id/ready', async (req, res) => {
         method = testCmd.includes('curl') ? 'curl' : testCmd.includes('wget') ? 'wget' : 'node';
 
         if (statusCode > 0) break;
-      } catch {
+      } catch (error) {
+        lastError = error;
         continue;
       }
     }
+    const latencyMs = elapsedMs();
     const isHealthy = statusCode >= 200 && statusCode < 400;
 
-    const startTime = info.State?.StartedAt;
-    const responseTime = startTime ? Date.now() - new Date(startTime).getTime() : null;
+    if (isHealthy) {
+      return res.json({ ready: true, status: statusCode, latency_ms: latencyMs, method });
+    }
 
-    res.json({
-      ready: isHealthy,
-      status: statusCode || 0,
-      response_time: responseTime,
-      method: method
+    if (statusCode > 0) {
+      return res.status(503).json({ ready: false, status: statusCode, latency_ms: latencyMs, method });
+    }
+
+    logger.warn('Sandbox readiness probe failed', {
+      sandboxId: req.params.id,
+      method: method || 'none',
+      error: lastError ? lastError.message : 'unknown'
     });
+
+    return res.status(503).json({ ready: false, status: 0, latency_ms: latencyMs, method: method || null, reason: 'Probe failed' });
   } catch (error) {
-    res.status(503).json({
-      ready: false,
-      reason: 'Container not found or inaccessible',
+    logger.warn('Sandbox readiness probe error', {
+      sandboxId: req.params.id,
       error: error.message
     });
+    res.status(503).json({ ready: false, reason: 'Container not found or inaccessible', error: 'Probe failed', latency_ms: elapsedMs() });
   }
 });
 
@@ -525,7 +545,14 @@ app.post('/sandbox', async (req, res) => {
     // Add to queue
     await queueService.addToQueue(sandboxData);
 
-    logger.info(`Sandbox ${sandboxId} created and queued`, sandboxData);
+    logger.info(`Sandbox ${sandboxId} created and queued`, {
+      sandboxId,
+      mode,
+      ttl,
+      fileCount: files ? files.length : 0,
+      tarProvided: Boolean(tarUrl),
+      envKeys: Object.keys(env || {})
+    });
 
     res.status(202).json({
       id: sandboxId,
@@ -570,7 +597,7 @@ app.delete('/sandbox/:id', async (req, res) => {
 });
 
 // Get sandbox logs (WebSocket endpoint)
-app.get('/sandbox/:id/logs', (req, res) => {
+app.get('/sandbox/:id/logs', requireAuth, (req, res) => {
   // This will be handled by WebSocket upgrade
   res.status(400).json({ error: 'Use WebSocket connection for logs' });
 });
@@ -579,9 +606,16 @@ app.get('/sandbox/:id/logs', (req, res) => {
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const sandboxId = url.searchParams.get('sandboxId');
+  const authHeader = req.headers['authorization'] || '';
 
   if (!sandboxId) {
     ws.close(1008, 'Missing sandboxId parameter');
+    return;
+  }
+
+  if (!authHeader.startsWith('Bearer ') || authHeader.slice(7) !== API_TOKEN) {
+    logger.warn('Rejected unauthorized WebSocket connection', { sandboxId: sandboxId || 'unknown' });
+    ws.close(1008, 'Unauthorized');
     return;
   }
 

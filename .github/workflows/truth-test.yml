@@ -1,0 +1,83 @@
+name: truth-test
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare environment
+        run: |
+          DOMAIN="${{ secrets.PREVIEW_DOMAIN }}"
+          if [ -z "$DOMAIN" ]; then
+            DOMAIN="${{ vars.PREVIEW_DOMAIN }}"
+          fi
+          if [ -z "$DOMAIN" ]; then
+            DOMAIN="hellyo.io"
+          fi
+          echo "PREVIEW_DOMAIN=$DOMAIN" >> "$GITHUB_ENV"
+
+          TOKEN="${{ secrets.API_TOKEN }}"
+          if [ -z "$TOKEN" ]; then
+            TOKEN=$(openssl rand -hex 16)
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "API_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+          cat <<EOF > .env.ci
+          PREVIEW_DOMAIN=$DOMAIN
+          API_TOKEN=$TOKEN
+          MINIO_ROOT_USER=admin
+          MINIO_ROOT_PASSWORD=supersecret
+          S3_ENDPOINT=http://minio:9000
+          S3_BUCKET=sandbox
+          S3_REGION=us-east-1
+          REDIS_URL=redis://redis:6379
+          DEV_TTL_MINUTES=45
+          PROD_TTL_MINUTES=240
+          MAX_CONCURRENT_BUILDS=3
+          EOF
+          cp .env.ci .env
+
+      - name: Start stack
+        run: docker compose --env-file .env.ci up -d
+
+      - name: Verify health endpoints
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: api.$PREVIEW_DOMAIN" http://127.0.0.1/health)
+          echo "Health status: $status"
+          if [ "$status" != "200" ]; then exit 1; fi
+
+      - name: Test admin auth
+        env:
+          API_TOKEN: ${{ env.API_TOKEN }}
+        run: |
+          unauth=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: api.$PREVIEW_DOMAIN" http://127.0.0.1/sandbox/demo/logs/tail?lines=1)
+          echo "Unauthenticated status: $unauth"
+          auth=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: api.$PREVIEW_DOMAIN" -H "Authorization: Bearer $API_TOKEN" http://127.0.0.1/sandbox/demo/logs/tail?lines=1)
+          echo "Authenticated status: $auth"
+
+      - name: Validate payload guards
+        env:
+          API_TOKEN: ${{ env.API_TOKEN }}
+        run: |
+          tmpdir=$(mktemp -d)
+          trap 'rm -rf "$tmpdir"' EXIT
+          python3 - <<'PY' > "$tmpdir/valid.json"
+          import json, base64
+          blob = base64.b64encode(b'a' * (2 * 1024 * 1024)).decode()
+          print(json.dumps({"files":[{"path":"valid.txt","content":blob}]}))
+          PY
+          ok=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Host: api.$PREVIEW_DOMAIN" -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" --data @"$tmpdir/valid.json" http://127.0.0.1/sandbox)
+          echo "Valid payload status: $ok"
+          python3 - <<'PY' > "$tmpdir/oversize.json"
+          import json, base64
+          blob = base64.b64encode(b'a' * (12 * 1024 * 1024)).decode()
+          print(json.dumps({"files":[{"path":"big.txt","content":blob}]}))
+          PY
+          oversize=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Host: api.$PREVIEW_DOMAIN" -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" --data @"$tmpdir/oversize.json" http://127.0.0.1/sandbox)
+          echo "Oversized payload status: $oversize"

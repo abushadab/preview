@@ -6,11 +6,12 @@ const tar = require('tar');
 const path = require('path');
 const fs = require('fs').promises;
 const logger = require('../utils/logger');
+const { resolveEnv } = require('../utils/env');
 
 class StorageService {
   constructor() {
     this.s3 = null;
-    this.bucket = process.env.S3_BUCKET || 'sandbox';
+    this.bucket = resolveEnv('S3_BUCKET', { fallback: 'sandbox' });
     this.MAX_EXTRACT_SIZE = 100 * 1024 * 1024; // 100MB extracted limit
     this.MAX_ARCHIVE_SIZE = 50 * 1024 * 1024; // 50MB archive limit
     this.MAX_COMPRESSION_RATIO = 50; // Prevent decompression bombs - max 50x compression ratio
@@ -18,11 +19,16 @@ class StorageService {
 
   async initialize() {
     try {
+      const endpoint = resolveEnv('S3_ENDPOINT', { fallback: 'http://minio:9000' });
+      const accessKeyId = resolveEnv('MINIO_ROOT_USER', { required: true });
+      const secretAccessKey = resolveEnv('MINIO_ROOT_PASSWORD', { required: true });
+      const region = resolveEnv('S3_REGION', { fallback: 'us-east-1' });
+
       this.s3 = new AWS.S3({
-        endpoint: process.env.S3_ENDPOINT || 'http://minio:9000',
-        accessKeyId: process.env.MINIO_ROOT_USER || 'admin',
-        secretAccessKey: process.env.MINIO_ROOT_PASSWORD || 'supersecret',
-        region: process.env.S3_REGION || 'us-east-1',
+        endpoint,
+        accessKeyId,
+        secretAccessKey,
+        region,
         s3ForcePathStyle: true
       });
 
